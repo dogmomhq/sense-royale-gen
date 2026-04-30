@@ -1,0 +1,83 @@
+name: gen-image
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: APIYI model
+        required: true
+        default: gpt-image-2
+      size:
+        description: image size (e.g. 1024x1536)
+        required: true
+        default: 1024x1536
+      quality:
+        description: quality (low|medium|high|auto)
+        required: true
+        default: high
+      tag:
+        description: output tag (filename slug)
+        required: true
+        default: long_scroll
+      prompt_b64:
+        description: base64-encoded prompt (avoids YAML escaping)
+        required: true
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: install
+        run: pip install requests
+      - name: generate
+        env:
+          APIYI_KEY: ${{ secrets.APIYI_KEY }}
+          MODEL: ${{ inputs.model }}
+          SIZE: ${{ inputs.size }}
+          QUALITY: ${{ inputs.quality }}
+          TAG: ${{ inputs.tag }}
+          PROMPT_B64: ${{ inputs.prompt_b64 }}
+        run: |
+          python3 <<'PYEOF'
+          import os, base64, json, requests, sys, time
+          prompt = base64.b64decode(os.environ['PROMPT_B64']).decode('utf-8')
+          model = os.environ['MODEL']
+          size = os.environ['SIZE']
+          quality = os.environ['QUALITY']
+          tag = os.environ['TAG']
+          key = os.environ['APIYI_KEY']
+          print(f"model={model} size={size} quality={quality} tag={tag} prompt_len={len(prompt)}")
+          t0 = time.time()
+          payload = {"model": model, "prompt": prompt, "n": 1, "size": size, "quality": quality}
+          r = requests.post("https://api.apiyi.com/v1/images/generations",
+                            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                            json=payload, timeout=600)
+          print(f"[{time.time()-t0:.1f}s] status={r.status_code}")
+          if r.status_code != 200:
+              print("BODY:", r.text[:2000])
+              sys.exit(1)
+          d = r.json()
+          item = d["data"][0]
+          os.makedirs("out", exist_ok=True)
+          if "b64_json" in item:
+              b = base64.b64decode(item["b64_json"])
+              path = f"out/{tag}.png"
+              open(path, "wb").write(b)
+              print(f"saved {len(b)//1024}KB -> {path}")
+          elif "url" in item:
+              ir = requests.get(item["url"], timeout=120)
+              path = f"out/{tag}.png"
+              open(path, "wb").write(ir.content)
+              print(f"saved from url {len(ir.content)//1024}KB -> {path}")
+          else:
+              print("UNKNOWN RESPONSE SHAPE:", json.dumps(d)[:500])
+              sys.exit(2)
+          PYEOF
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gen-${{ inputs.tag }}
+          path: out/
+          retention-days: 7
