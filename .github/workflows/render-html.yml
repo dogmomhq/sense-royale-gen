@@ -10,38 +10,42 @@ on:
       viewport_h:
         required: true
         default: '2224'
-      html_b64:
+      html_path:
         required: true
-        description: 'base64 of the HTML to render'
+        description: 'repo-relative path to the HTML file (e.g. sense_proto/render_v25.html)'
 jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: |
+      - name: install playwright
+        run: |
           npm init -y >/dev/null 2>&1
           npm install playwright@latest --silent
           npx playwright install chromium --with-deps
       - name: render
         env:
-          HTML_B64: ${{ inputs.html_b64 }}
           TAG: ${{ inputs.tag }}
           VW: ${{ inputs.viewport_w }}
           VH: ${{ inputs.viewport_h }}
+          HTML_PATH: ${{ inputs.html_path }}
         run: |
           mkdir -p out
-          echo "$HTML_B64" | base64 -d > out/input.html
+          test -f "$HTML_PATH" || { echo "HTML not found at $HTML_PATH"; exit 1; }
           node -e "
             const { chromium } = require('playwright');
+            const path = require('path');
             (async () => {
               const b = await chromium.launch();
               const ctx = await b.newContext({ viewport: { width: parseInt(process.env.VW), height: parseInt(process.env.VH) }, deviceScaleFactor: 1 });
               const page = await ctx.newPage();
-              await page.goto('file://' + require('path').resolve('out/input.html'), { waitUntil: 'networkidle', timeout: 15000 });
-              await page.waitForTimeout(2500);
+              const fileUrl = 'file://' + path.resolve(process.env.HTML_PATH);
+              await page.goto(fileUrl, { waitUntil: 'networkidle', timeout: 20000 });
+              await page.waitForTimeout(3000);
               await page.screenshot({ path: 'out/' + process.env.TAG + '.png', clip: { x:0, y:0, width: parseInt(process.env.VW), height: parseInt(process.env.VH) } });
               await b.close();
               console.log('rendered ' + process.env.TAG + '.png');
