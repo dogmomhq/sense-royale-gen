@@ -1,0 +1,100 @@
+name: gen-edit
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: APIYI edits model
+        required: true
+        default: gpt-image-1
+      size:
+        required: true
+        default: 1024x1536
+      quality:
+        required: true
+        default: high
+      tag:
+        required: true
+      prompt_b64:
+        required: true
+      image_url:
+        description: raw URL of input image (PNG)
+        required: true
+      mask_url:
+        description: raw URL of mask (transparent = areas to edit)
+        required: true
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - env:
+          APIYI_KEY: ${{ secrets.APIYI_KEY }}
+          MODEL: ${{ inputs.model }}
+          SIZE: ${{ inputs.size }}
+          QUALITY: ${{ inputs.quality }}
+          TAG: ${{ inputs.tag }}
+          PROMPT_B64: ${{ inputs.prompt_b64 }}
+          IMAGE_URL: ${{ inputs.image_url }}
+          MASK_URL: ${{ inputs.mask_url }}
+        run: |
+          python3 <<'PYEOF'
+          import os, base64, json, requests, sys, time
+          prompt = base64.b64decode(os.environ['PROMPT_B64']).decode('utf-8')
+          model = os.environ['MODEL']
+          size = os.environ['SIZE']
+          quality = os.environ['QUALITY']
+          tag = os.environ['TAG']
+          key = os.environ['APIYI_KEY']
+          img_url = os.environ['IMAGE_URL']
+          mask_url = os.environ['MASK_URL']
+          print(f"model={model} size={size} quality={quality} tag={tag}")
+          img_bytes = requests.get(img_url, timeout=60).content
+          mask_bytes = requests.get(mask_url, timeout=60).content
+          print(f"image={len(img_bytes)}B mask={len(mask_bytes)}B prompt_len={len(prompt)}")
+          t0 = time.time()
+          files = {
+              'image': ('image.png', img_bytes, 'image/png'),
+              'mask': ('mask.png', mask_bytes, 'image/png'),
+          }
+          data = {
+              'model': model,
+              'prompt': prompt,
+              'size': size,
+              'n': '1',
+          }
+          # quality only valid for some models
+          if model == 'gpt-image-2' or model == 'gpt-image-1':
+              data['quality'] = quality
+          r = requests.post('https://api.apiyi.com/v1/images/edits',
+                            headers={'Authorization': f'Bearer {key}'},
+                            files=files, data=data, timeout=600)
+          print(f"[{time.time()-t0:.1f}s] status={r.status_code}")
+          if r.status_code != 200:
+              print('BODY:', r.text[:3000])
+              sys.exit(1)
+          d = r.json()
+          item = d['data'][0]
+          os.makedirs('out', exist_ok=True)
+          if 'b64_json' in item:
+              b = base64.b64decode(item['b64_json'])
+              path = f"out/{tag}.png"
+              open(path,'wb').write(b)
+              print(f"saved {len(b)//1024}KB -> {path}")
+          elif 'url' in item:
+              ir = requests.get(item['url'], timeout=120)
+              path = f"out/{tag}.png"
+              open(path,'wb').write(ir.content)
+              print(f"saved from url {len(ir.content)//1024}KB -> {path}")
+          else:
+              print('UNKNOWN:', json.dumps(d)[:500])
+              sys.exit(2)
+          PYEOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gen-${{ inputs.tag }}
+          path: out/
+          retention-days: 7
